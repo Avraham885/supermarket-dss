@@ -1,10 +1,10 @@
 import os
-import gzip
 import requests
-from bs4 import BeautifulSoup
 import pandas as pd
+import gzip
+import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
 from sqlalchemy import create_engine, text
-import lxml.etree as ET
 from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
@@ -20,11 +20,13 @@ if not db_url:
 
 engine = create_engine(db_url)
 
-BASE_URL = "http://prices.shufersal.co.il/"
 CHAIN_ID = "7290027600007"
 CHAIN_NAME = "שופרסל"
+BASE_URL = "http://prices.shufersal.co.il/"
 
-# יצירת תיקיות זמניות אם לא קיימות
+# רשימת המעקב המקורית והמעולה שלך!
+WATCHLIST_STORES = ["001", "042", "116", "205", "300", "002"]
+
 DATA_DIR = "ETL_Process_Shufersal"
 STORES_DIR = os.path.join(DATA_DIR, "stores")
 PRICES_DIR = os.path.join(DATA_DIR, "prices")
@@ -34,13 +36,11 @@ os.makedirs(PRICES_DIR, exist_ok=True)
 # ==========================================
 # EMAIL CONFIGURATION
 # ==========================================
-# משתני סביבה שנגדיר בהמשך ב-GitHub עבור שליחת המייל
 EMAIL_SENDER = os.environ.get("EMAIL_SENDER") 
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD") 
 EMAIL_RECEIVER = os.environ.get("EMAIL_RECEIVER")
 
 def send_email_report(subject, body):
-    """פונקציה לשליחת מייל התראה מפורט"""
     if not all([EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER]):
         print("[WARNING] Email credentials not fully set. Skipping email alert.")
         return
@@ -50,10 +50,8 @@ def send_email_report(subject, body):
         msg['From'] = EMAIL_SENDER
         msg['To'] = EMAIL_RECEIVER
         msg['Subject'] = subject
-
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
-        # התחברות לשרת Gmail
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
@@ -115,69 +113,71 @@ REGION_MAPPING = {
 }
 
 def normalize_city_name(city_name):
-    """פונקציה שמנקה את שם העיר בזמן אמת לפי המילונים"""
     if not isinstance(city_name, str) or city_name.strip() == '': 
         return 'לא ידוע'
-    
     city_name = city_name.strip()
-    
-    # המרה לפי מילון שגיאות כתיב 
-    if city_name in CITY_MAPPING: 
-        return CITY_MAPPING[city_name]
-        
-    # טיפול גורף בכל עיר שמתחילה ב'קרית ' והפיכתה ל'קריית '
-    if city_name.startswith('קרית '): 
-        return city_name.replace('קרית ', 'קריית ')
-        
+    if city_name in CITY_MAPPING: return CITY_MAPPING[city_name]
+    if city_name.startswith('קרית '): return city_name.replace('קרית ', 'קריית ')
     return city_name
 
 # ==========================================
-# ETL LOGIC
+# ETL LOGIC (Original Robust Version)
 # ==========================================
 def get_download_links():
-    links = []
     print("[INFO] Connecting to Shufersal website to fetch links...")
-    session = requests.Session()
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    links = []
+    found_targets = set()
+    targets_needed = 1 + len(WATCHLIST_STORES)
     
-    for page in range(1, 150):
-        #print(f"[INFO] Scanning page {page}...") # הוסתר כדי למנוע ספאם בלוגים של גיטהאב
-        url = f"{BASE_URL}?page={page}"
-        resp = session.get(url)
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        
-        table = soup.find('table')
-        if not table: break
-        
-        rows = table.find_all('tr')[1:]
-        if not rows: break
-        
-        for row in rows:
-            cols = row.find_all('td')
-            if len(cols) > 0:
-                fname = cols[0].text.strip()
-                link = cols[0].find('a')['href']
-                
-                # ניקח רק סניפים רגילים, או מחירים רגילים 
-                if ("Stores" in fname or "PriceFull" in fname) and "Promo" not in fname and "Null" not in fname:
-                    print(f"  [+] Found: {fname}")
-                    links.append((fname, link))
-                    
-        if len(links) >= 7:  # הגבלה ל-6 סניפים + 1 קובץ Stores לבדיקות שלנו
+    for page_num in range(1, 251):
+        # print(f"[INFO] Scanning page {page_num}...")
+        try:
+            response = requests.get(f"{BASE_URL}?page={page_num}", headers=headers, timeout=15)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            for tr in soup.find_all('tr'):
+                a_tag = tr.find('a', href=True)
+                if a_tag:
+                    row_text = tr.get_text(separator=' ', strip=True)
+                    if CHAIN_ID in row_text:
+                        for word in row_text.split():
+                            if CHAIN_ID in word:
+                                is_target = False
+                                if f"Stores{CHAIN_ID}" in word and "Stores" not in found_targets:
+                                    is_target = True
+                                    found_targets.add("Stores")
+                                for store in WATCHLIST_STORES:
+                                    target = f"PriceFull{CHAIN_ID}-{store}"
+                                    if target in word and target not in found_targets:
+                                        is_target = True
+                                        found_targets.add(target)
+                                        break
+                                
+                                if is_target:
+                                    url = a_tag['href']
+                                    if url.startswith('/'): url = BASE_URL.rstrip('/') + url
+                                    links.append((word, url))
+                                    print(f"  [+] Found: {word}")
+                                break
+            
+            if len(found_targets) >= targets_needed: break
+        except Exception as e:
+            print(f"[ERROR] Failed on page {page_num}: {e}")
             break
             
     return links
 
-def fast_parse_xml(file_path, tag_name):
-    records = []
+def fast_parse_xml(file_path, item_tag):
+    items = []
     with gzip.open(file_path, 'rb') as f:
-        context = ET.iterparse(f, events=('end',), tag=tag_name)
+        context = ET.iterparse(f, events=('end',))
         for event, elem in context:
-            record = {child.tag: child.text for child in elem}
-            records.append(record)
-            elem.clear()
-            while elem.getprevious() is not None:
-                del elem.getparent()[0]
-    return pd.DataFrame(records)
+            if elem.tag == item_tag or elem.tag.lower() == item_tag.lower() or elem.tag.endswith(item_tag):
+                item_data = {child.tag: child.text for child in elem}
+                items.append(item_data)
+                elem.clear()
+    return pd.DataFrame(items)
 
 def run_full_etl():
     print("======================================")
@@ -187,7 +187,6 @@ def run_full_etl():
     start_time = datetime.now()
     stats = {"stores_files": 0, "price_files": 0, "total_prices_inserted": 0}
 
-    # יצירת הרשת במסד הנתונים אם לא קיימת
     with engine.begin() as conn:
         conn.execute(text(f"""
             INSERT INTO "Dim_Chains" (chain_id, chain_name) 
@@ -204,7 +203,7 @@ def run_full_etl():
     stats["stores_files"] = len(stores_links)
     stats["price_files"] = len(price_links)
 
-    # --- שלב א: קבצי סניפים וערים ---
+    # --- שלב א: קבצי סניפים וערים (עם נרמול) ---
     for fname, url in stores_links:
         print(f"\n[STEP] Processing Stores: {fname}")
         local_path = os.path.join(STORES_DIR, fname + ".gz")
@@ -215,23 +214,19 @@ def run_full_etl():
         df.columns = [c.upper() for c in df.columns]
         df = df.rename(columns={'STOREID': 'StoreId', 'STORENAME': 'StoreName', 'CITY': 'City'})
         
-        # נרמול שמות הערים באמצעות הפונקציה שלנו
         df['City'] = df['City'].apply(normalize_city_name)
         
         with engine.begin() as conn:
-            # הזרקת ערים ומחוזות (מונע כפילויות)
             cities = df[['City']].drop_duplicates().rename(columns={'City': 'city_name'})
             cities['region'] = cities['city_name'].map(lambda x: REGION_MAPPING.get(x, 'לא מוגדר'))
             
             for idx, row in cities.iterrows():
                 conn.execute(text('INSERT INTO "Dim_City" (city_name, region) VALUES (:city_name, :region) ON CONFLICT (city_name) DO UPDATE SET region = EXCLUDED.region'), row.to_dict())
             
-            # הזרקת סניפים
             df['store_id'] = CHAIN_ID + "-" + df['StoreId'].astype(str).str.zfill(3)
             df['chain_id'] = CHAIN_ID
             stores_to_db = df[['store_id', 'chain_id', 'StoreName', 'City']].rename(columns={'StoreName': 'store_name', 'City': 'city'})
             
-            # נשתמש בטבלה זמנית לעדכון מהיר של סניפים
             stores_to_db.to_sql('temp_stores', conn, if_exists='replace', index=False)
             conn.execute(text("""
                 INSERT INTO "Dim_Stores" (store_id, chain_id, store_name, city)
@@ -264,7 +259,6 @@ def run_full_etl():
 
         print(f"  [DB] Injecting {len(prices)} rows to Supabase...")
         with engine.begin() as conn:
-            # הזרקה מהירה של מוצרים (Bulk)
             products.to_sql('temp_products', conn, if_exists='replace', index=False)
             conn.execute(text("""
                 INSERT INTO "Dim_Products" (barcode, item_name, category, manufacturer)
@@ -273,7 +267,6 @@ def run_full_etl():
             """))
             conn.execute(text("DROP TABLE temp_products;"))
             
-            # הזרקת מחירים (Bulk)
             prices.to_sql('Fact_Prices', conn, if_exists='append', index=False, chunksize=1000, method='multi')
         
         stats["total_prices_inserted"] += len(prices)
@@ -286,7 +279,6 @@ def run_full_etl():
     print(f"[DONE] 🎉 All data processed successfully in {duration} minutes!")
     print("======================================")
     
-    # שליחת מייל הצלחה
     report_body = f"""Shufersal Data Pipeline - SUCCESS 🟢
 
 Run Time: {duration} minutes
@@ -304,15 +296,6 @@ if __name__ == "__main__":
     except Exception as e:
         error_tb = traceback.format_exc()
         print(f"\n[CRITICAL ERROR] Pipeline failed:\n{error_tb}")
-        
-        # שליחת מייל כישלון
-        error_body = f"""Shufersal Data Pipeline - FAILED 🔴
-
-An error occurred during the ETL process.
-Error details:
-{error_tb}
-
-Please check GitHub Actions logs.
-"""
+        error_body = f"Shufersal Data Pipeline - FAILED 🔴\n\nError details:\n{error_tb}"
         send_email_report("🔴 ETL FAILED: Shufersal", error_body)
-        raise e  # זריקת השגיאה הלאה כדי שגיטהאב יידע שהסקריפט נכשל
+        raise e
