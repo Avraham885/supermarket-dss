@@ -282,7 +282,14 @@ def run_full_etl():
             """))
             conn.execute(text("DROP TABLE temp_products;"))
             
-            prices.to_sql('Fact_Prices', conn, if_exists='append', index=False, chunksize=1000, method='multi')
+            # הזרקת מחירים חכמה (ללא כפילויות!)
+            prices.to_sql('temp_prices', conn, if_exists='replace', index=False)
+            conn.execute(text("""
+                INSERT INTO "Fact_Prices" (store_id, barcode, price, sample_date, chain_id)
+                SELECT store_id, barcode, price, sample_date, chain_id FROM temp_prices
+                ON CONFLICT (store_id, barcode, sample_date) DO NOTHING;
+            """))
+            conn.execute(text("DROP TABLE temp_prices;"))
         
         stats["total_prices_inserted"] += len(prices)
         print(f"  [SUCCESS] Store {store_num} prices inserted.")
