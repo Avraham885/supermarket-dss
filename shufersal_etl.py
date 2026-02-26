@@ -299,8 +299,6 @@ def run_full_etl():
             stats["total_prices_inserted"] += inserted_rows
             print(f"  [SUCCESS] Store {store_num}: {inserted_rows} NEW prices inserted out of {len(prices)} scanned.")
         
-        stats["total_prices_inserted"] += len(prices)
-        print(f"  [SUCCESS] Store {store_num} prices inserted.")
 
     end_time = datetime.now()
     duration = round((end_time - start_time).total_seconds() / 60, 2)
