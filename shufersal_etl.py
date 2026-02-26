@@ -200,7 +200,7 @@ def run_full_etl():
     print("======================================")
     
     start_time = datetime.now()
-    stats = {"stores_files": 0, "price_files": 0, "total_prices_inserted": 0}
+    stats = {"stores_files": 0, "price_files": 0, "total_prices_scanned": 0, "total_prices_inserted": 0}
 
     with engine.begin() as conn:
         conn.execute(text(f"""
@@ -273,6 +273,10 @@ def run_full_etl():
         prices['sample_date'] = pd.to_datetime(prices['sample_date'])
 
         print(f"  [DB] Injecting {len(prices)} rows to Supabase...")
+        
+        stats["total_prices_scanned"] += len(prices)
+
+        print(f"  [DB] Injecting to Supabase (filtering duplicates)...")
         with engine.begin() as conn:
             products.to_sql('temp_products', conn, if_exists='replace', index=False)
             conn.execute(text("""
@@ -282,14 +286,18 @@ def run_full_etl():
             """))
             conn.execute(text("DROP TABLE temp_products;"))
             
-            # הזרקת מחירים חכמה (ללא כפילויות!)
+            # הזרקת מחירים חכמה ולכידת כמות השורות החדשות שהוזרקו בפועל
             prices.to_sql('temp_prices', conn, if_exists='replace', index=False)
-            conn.execute(text("""
+            result = conn.execute(text("""
                 INSERT INTO "Fact_Prices" (store_id, barcode, price, sample_date, chain_id)
                 SELECT store_id, barcode, price, sample_date, chain_id FROM temp_prices
                 ON CONFLICT (store_id, barcode, sample_date) DO NOTHING;
             """))
             conn.execute(text("DROP TABLE temp_prices;"))
+            
+            inserted_rows = result.rowcount
+            stats["total_prices_inserted"] += inserted_rows
+            print(f"  [SUCCESS] Store {store_num}: {inserted_rows} NEW prices inserted out of {len(prices)} scanned.")
         
         stats["total_prices_inserted"] += len(prices)
         print(f"  [SUCCESS] Store {store_num} prices inserted.")
@@ -297,16 +305,34 @@ def run_full_etl():
     end_time = datetime.now()
     duration = round((end_time - start_time).total_seconds() / 60, 2)
     
+    # חישוב גודל מסד הנתונים בסופאבייס בזמן אמת
+    try:
+        with engine.connect() as conn:
+            size_bytes = conn.execute(text("SELECT pg_database_size(current_database());")).scalar()
+            db_size_gb = size_bytes / (1024 ** 3)
+    except Exception as e:
+        print(f"[WARNING] Could not get DB size: {e}")
+        db_size_gb = 0.0
+    
     print("\n======================================")
     print(f"[DONE] 🎉 All data processed successfully in {duration} minutes!")
     print("======================================")
     
+    # שליחת מייל הצלחה משודרג
     report_body = f"""Shufersal Data Pipeline - SUCCESS 🟢
 
 Run Time: {duration} minutes
 Store Files Processed: {stats['stores_files']}
 Price Files Processed: {stats['price_files']}
-Total Price Rows Inserted: {stats['total_prices_inserted']}
+
+📊 Data Metrics:
+- Total Prices Scanned: {stats['total_prices_scanned']}
+- NEW Prices Inserted: {stats['total_prices_inserted']}
+
+💾 Database Storage (Supabase):
+- Current Size: {db_size_gb:.3f} GB
+- Max Allowed (Free Tier): 0.500 GB
+- Usage: {(db_size_gb / 0.5) * 100:.1f}%
 
 Your Supermarket DSS is up to date! 🚀
 """
