@@ -290,7 +290,7 @@ def run_full_etl():
             prices.to_sql('temp_prices', conn, if_exists='replace', index=False)
             result = conn.execute(text("""
                 INSERT INTO "Fact_Prices" (store_id, barcode, price, sample_date, chain_id)
-                SELECT store_id, barcode, price, sample_date, chain_id FROM temp_prices
+                SELECT store_id, barcode, CAST(price AS NUMERIC), CAST(sample_date AS TIMESTAMP), chain_id FROM temp_prices
                 ON CONFLICT (store_id, barcode, sample_date) DO NOTHING;
             """))
             conn.execute(text("DROP TABLE temp_prices;"))
