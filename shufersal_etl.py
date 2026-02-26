@@ -125,15 +125,22 @@ def normalize_city_name(city_name):
 # ==========================================
 def get_download_links():
     print("[INFO] Connecting to Shufersal website to fetch links...")
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    # תחפושת מלאה לדפדפן כדי להימנע מחסימות או האטה מכוונת
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "keep-alive"
+    }
+    
     links = []
     found_targets = set()
     targets_needed = 1 + len(WATCHLIST_STORES)
     
     for page_num in range(1, 251):
-        # print(f"[INFO] Scanning page {page_num}...")
         try:
-            response = requests.get(f"{BASE_URL}?page={page_num}", headers=headers, timeout=15)
+            # הגדלנו את זמן ההמתנה מ-15 ל-45 שניות
+            response = requests.get(f"{BASE_URL}?page={page_num}", headers=headers, timeout=45)
             soup = BeautifulSoup(response.text, 'html.parser')
             
             for tr in soup.find_all('tr'):
@@ -162,10 +169,18 @@ def get_download_links():
                                 break
             
             if len(found_targets) >= targets_needed: break
+            
+        except requests.exceptions.Timeout:
+            print(f"[ERROR] Shufersal server timeout on page {page_num}!")
+            break
         except Exception as e:
             print(f"[ERROR] Failed on page {page_num}: {e}")
             break
             
+    # --- מנגנון אל-כשל למניעת False Positive ---
+    if len(links) == 0:
+        raise Exception("Critical: Found 0 files! The scraper was blocked or the site is down. Failing the pipeline.")
+        
     return links
 
 def fast_parse_xml(file_path, item_tag):
