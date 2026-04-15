@@ -1,4 +1,5 @@
 .env
+check_columns.py
 venv/
 __pycache__/
 ETL_Process_Shufersal/

@@ -24,7 +24,6 @@ CHAIN_ID = "7290027600007"
 CHAIN_NAME = "שופרסל"
 BASE_URL = "http://prices.shufersal.co.il/"
 
-# רשימת המעקב המקורית והמעולה שלך!
 WATCHLIST_STORES = ["001", "042", "116", "205", "300", "002"]
 
 DATA_DIR = "ETL_Process_Shufersal"
@@ -57,7 +56,7 @@ def send_email_report(subject, body):
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.send_message(msg)
         server.quit()
-        print("[SUCCESS] Email report sent successfully.")
+        print(f"[SUCCESS] Email sent: {subject}")
     except Exception as e:
         print(f"[ERROR] Failed to send email: {e}")
 
@@ -121,11 +120,10 @@ def normalize_city_name(city_name):
     return city_name
 
 # ==========================================
-# ETL LOGIC (Original Robust Version)
+# ETL LOGIC
 # ==========================================
 def get_download_links():
     print("[INFO] Connecting to Shufersal website to fetch links...")
-    # תחפושת מלאה לדפדפן כדי להימנע מחסימות או האטה מכוונת
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -139,7 +137,6 @@ def get_download_links():
     
     for page_num in range(1, 251):
         try:
-            # הגדלנו את זמן ההמתנה מ-15 ל-45 שניות
             response = requests.get(f"{BASE_URL}?page={page_num}", headers=headers, timeout=45)
             soup = BeautifulSoup(response.text, 'html.parser')
             
@@ -177,9 +174,8 @@ def get_download_links():
             print(f"[ERROR] Failed on page {page_num}: {e}")
             break
             
-    # --- מנגנון אל-כשל למניעת False Positive ---
     if len(links) == 0:
-        raise Exception("Critical: Found 0 files! The scraper was blocked or the site is down. Failing the pipeline.")
+        raise Exception("Critical: Found 0 files! The scraper was blocked or the site is down.")
         
     return links
 
@@ -218,7 +214,7 @@ def run_full_etl():
     stats["stores_files"] = len(stores_links)
     stats["price_files"] = len(price_links)
 
-    # --- שלב א: קבצי סניפים וערים (עם נרמול) ---
+    # --- שלב א: קבצי סניפים ---
     for fname, url in stores_links:
         print(f"\n[STEP] Processing Stores: {fname}")
         local_path = os.path.join(STORES_DIR, fname + ".gz")
@@ -228,7 +224,6 @@ def run_full_etl():
         df = fast_parse_xml(local_path, 'STORE')
         df.columns = [c.upper() for c in df.columns]
         df = df.rename(columns={'STOREID': 'StoreId', 'STORENAME': 'StoreName', 'CITY': 'City'})
-        
         df['City'] = df['City'].apply(normalize_city_name)
         
         with engine.begin() as conn:
@@ -252,7 +247,7 @@ def run_full_etl():
             
         print(f"  [SUCCESS] Dim_Stores and Dim_City updated.")
 
-    # --- שלב ב: קבצי מחירים ומוצרים ---
+    # --- שלב ב: קבצי מחירים ---
     for fname, url in price_links:
         print(f"\n[STEP] Processing Prices: {fname}")
         local_path = os.path.join(PRICES_DIR, fname + ".gz")
@@ -261,6 +256,28 @@ def run_full_etl():
         
         df = fast_parse_xml(local_path, 'Item')
         
+        # =====================================================================
+        # תיקון דינאמי של שמות העמודות (Schema Drift Handler)
+        # =====================================================================
+        # 1. טיפול ביצרן: הופך את ManufactureName ל-ManufacturerName
+        if 'ManufacturerName' not in df.columns:
+            if 'ManufactureName' in df.columns:
+                df = df.rename(columns={'ManufactureName': 'ManufacturerName'})
+            else:
+                df['ManufacturerName'] = 'לא ידוע'
+
+        # 2. טיפול בתאריך: הופך את PriceUpdateTime ל-PriceUpdateDate
+        if 'PriceUpdateDate' not in df.columns:
+            if 'PriceUpdateTime' in df.columns:
+                df = df.rename(columns={'PriceUpdateTime': 'PriceUpdateDate'})
+            else:
+                df['PriceUpdateDate'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+        # 3. גיבוי לעמודות חסרות נוספות כדי למנוע קריסה
+        if 'ItemName' not in df.columns: df['ItemName'] = 'לא ידוע'
+        if 'ItemPrice' not in df.columns: df['ItemPrice'] = 0.0
+        # =====================================================================
+
         products = df[['ItemCode', 'ItemName', 'ManufacturerName']].drop_duplicates(subset=['ItemCode']).copy()
         products = products.rename(columns={'ItemCode': 'barcode', 'ItemName': 'item_name', 'ManufacturerName': 'manufacturer'})
         products['category'] = 'כללי'
@@ -272,8 +289,6 @@ def run_full_etl():
         prices['store_id'] = f"{CHAIN_ID}-{store_num}"
         prices['sample_date'] = pd.to_datetime(prices['sample_date'])
 
-        print(f"  [DB] Injecting {len(prices)} rows to Supabase...")
-        
         stats["total_prices_scanned"] += len(prices)
 
         print(f"  [DB] Injecting to Supabase (filtering duplicates)...")
@@ -286,7 +301,6 @@ def run_full_etl():
             """))
             conn.execute(text("DROP TABLE temp_products;"))
             
-            # הזרקת מחירים חכמה ולכידת כמות השורות החדשות שהוזרקו בפועל
             prices.to_sql('temp_prices', conn, if_exists='replace', index=False)
             result = conn.execute(text("""
                 INSERT INTO "Fact_Prices" (store_id, barcode, price, sample_date, chain_id)
@@ -298,12 +312,10 @@ def run_full_etl():
             inserted_rows = result.rowcount
             stats["total_prices_inserted"] += inserted_rows
             print(f"  [SUCCESS] Store {store_num}: {inserted_rows} NEW prices inserted out of {len(prices)} scanned.")
-        
 
     end_time = datetime.now()
     duration = round((end_time - start_time).total_seconds() / 60, 2)
     
-    # חישוב גודל מסד הנתונים בסופאבייס בזמן אמת
     try:
         with engine.connect() as conn:
             size_bytes = conn.execute(text("SELECT pg_database_size(current_database());")).scalar()
@@ -316,7 +328,6 @@ def run_full_etl():
     print(f"[DONE] 🎉 All data processed successfully in {duration} minutes!")
     print("======================================")
     
-    # שליחת מייל הצלחה משודרג
     report_body = f"""Shufersal Data Pipeline - SUCCESS 🟢
 
 Run Time: {duration} minutes
